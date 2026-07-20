@@ -6,60 +6,38 @@
 # ///
 """Analyze an example icon image to extract its style description.
 
-Uses the MiniMax VLM (Vision Language Model) API to understand the visual
-style of a user-provided icon, then outputs a style prompt that can be fed
-into generate_icon.py via --custom-style.
+Uses the configured provider's VLM (vision language model) to understand the
+visual style of a user-provided icon, then outputs a style prompt that can be
+fed into generate_icon.py via --custom-style.
+
+Supported providers (select via --provider or ICON_PROVIDER env):
+  - minimax           MiniMax-M1 (default; backward compatible)
+  - qwen              qwen-vl-max (Aliyun DashScope)
+  - openai            gpt-4o
+  - openai-compatible Any OpenAI-compatible gateway
 
 Usage:
     uv run analyze_style.py path/to/example_icon.png
     uv run analyze_style.py https://example.com/icon.png
     uv run analyze_style.py path/to/icon.png --output-style-only
+    uv run analyze_style.py icon.png --provider qwen --vlm-model qwen-vl-max
 
 Environment:
-    MINIMAX_API_KEY  - MiniMax API key (required)
-    MINIMAX_API_HOST - API host, default https://api.minimaxi.com
+    ICON_PROVIDER / ICON_API_KEY / ICON_API_HOST / ICON_VLM_MODEL
+    Legacy (minimax only): MINIMAX_API_KEY / MINIMAX_API_HOST
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import os
 import sys
 from pathlib import Path
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: 'requests' not found. Run with: uv run analyze_style.py ...", file=sys.stderr)
-    sys.exit(1)
+import providers
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-
-def load_env_file() -> None:
-    """Load .env file from script directory as fallback for env vars.
-
-    Precedence: shell environment > .env file > built-in defaults.
-    """
-    env_path = SCRIPT_DIR / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-load_env_file()
-
-DEFAULT_HOST = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
-CHAT_ENDPOINT = "/v1/chat/completions"
 SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB (API limit)
 
@@ -122,51 +100,6 @@ def is_url(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 
-def call_vlm(image_input: str, api_key: str, host: str) -> str:
-    url = f"{host.rstrip('/')}{CHAT_ENDPOINT}"
-
-    if is_url(image_input):
-        image_content: dict = {"type": "image_url", "image_url": {"url": image_input}}
-    else:
-        image_content = {"type": "image_url", "image_url": {"url": image_input}}
-
-    payload = {
-        "model": "MiniMax-M1",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": ANALYSIS_PROMPT},
-                    image_content,
-                ],
-            }
-        ],
-        "max_tokens": 600,
-        "temperature": 0.3,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    resp.raise_for_status()
-    result = resp.json()
-
-    base_resp = result.get("base_resp", {})
-    if base_resp.get("status_code", 0) != 0:
-        print(f"API ERROR: {base_resp.get('status_msg', 'unknown')}", file=sys.stderr)
-        sys.exit(1)
-
-    choices = result.get("choices", [])
-    if not choices:
-        print("ERROR: no response from model.", file=sys.stderr)
-        sys.exit(1)
-
-    return choices[0].get("message", {}).get("content", "")
-
-
 def extract_style_prompt(text: str) -> str | None:
     for line in text.split("\n"):
         line = line.strip()
@@ -188,21 +121,25 @@ Examples:
   %(prog)s path/to/icon.png
   %(prog)s https://example.com/icon.png
   %(prog)s icon.png --output-style-only
+  %(prog)s icon.png --provider qwen --vlm-model qwen-vl-max
 """,
     )
     parser.add_argument("image", help="Path or URL to the example icon image")
-    parser.add_argument("--api-key", help="MiniMax API key (or set MINIMAX_API_KEY env)")
-    parser.add_argument("--host", help="API host (or set MINIMAX_API_HOST env)")
+
+    # Provider configuration (shared with generate_icon.py)
+    parser.add_argument(
+        "--provider",
+        choices=providers.SUPPORTED_PROVIDERS,
+        help="VLM provider (or set ICON_PROVIDER env). Default: minimax",
+    )
+    parser.add_argument("--vlm-model", help="VLM model name (or set ICON_VLM_MODEL env)")
+    parser.add_argument("--api-key", help="API key (or set ICON_API_KEY env)")
+    parser.add_argument("--host", help="API host/base URL (or set ICON_API_HOST env)")
     parser.add_argument("--output-style-only", action="store_true", help="Only output the extracted STYLE_PROMPT line (for scripting)")
 
     args = parser.parse_args()
 
-    api_key = args.api_key or os.environ.get("MINIMAX_API_KEY")
-    if not api_key:
-        print("ERROR: MINIMAX_API_KEY not set. Export it or pass --api-key.", file=sys.stderr)
-        sys.exit(1)
-
-    host = args.host or DEFAULT_HOST
+    cfg = providers.resolve_vlm_config(args.provider, args.api_key, args.host, args.vlm_model)
 
     if is_url(args.image):
         image_input: str = args.image
@@ -211,7 +148,9 @@ Examples:
         image_input = load_image_as_data_url(args.image)
         print(f"Analyzing image: {args.image}")
 
-    response_text = call_vlm(image_input, api_key, host)
+    print(f"Provider: {cfg['provider']}  VLM: {cfg['model']}  Host: {cfg['host']}")
+
+    response_text = providers.vlm_analyze(cfg, image_input, ANALYSIS_PROMPT, max_tokens=600)
 
     style_prompt = extract_style_prompt(response_text)
 
