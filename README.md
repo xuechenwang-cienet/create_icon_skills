@@ -1,3 +1,11 @@
+> **已归档（2026-10-22）**：`create-icon` / `icon-finder` 已迁入 [`zenanswer/agent-skills`](https://github.com/zenanswer/agent-skills)，改用官方 skills CLI 安装与更新：
+>
+> ```bash
+> npx -y skills@latest add zenanswer/agent-skills -g -s create-icon icon-finder -a opencode claude-code -y
+> ```
+>
+> 本仓库仅作历史留存，不再更新。
+
 # Icon Skills for Presentations
 
 Two complementary opencode skills for getting icons into your PPT slides:
